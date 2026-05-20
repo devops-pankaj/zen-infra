@@ -22,7 +22,7 @@ This guide walks you through setting up the zen-pharma infrastructure on your ow
 11. [Step 8 — Verify the Infrastructure](#11-step-8--verify-the-infrastructure)
 12. [Infrastructure Details](#12-infrastructure-details)
 13. [Day-2 Operations](#13-day-2-operations)
-14. [Destroying Infrastructure](#14-destroying-infrastructure)
+14. [Cluster Cleanup / Destroying Infrastructure](#14-destroying-infrastructure)
 15. [Troubleshooting](#15-troubleshooting)
 
 ---
@@ -807,31 +807,60 @@ terraform plan \
 
 > **Warning**: This permanently deletes all infrastructure including the EKS cluster, RDS database, and all data. There is no undo.
 
-### Via Pipeline (Recommended)
+### Step 1 — Remove the Ingress Resource First (Required)
+
+**Do this before running Terraform destroy.** The NGINX Ingress Controller creates an AWS Network Load Balancer (NLB) that Terraform does not manage. If the NLB still exists when Terraform tries to delete the VPC, the destroy will fail — AWS blocks VPC deletion while resources still reference its subnets.
+
+#### Option A — kubectl (Recommended if cluster is reachable)
+
+```bash
+# Update local kubeconfig first
+aws eks update-kubeconfig --region us-east-1 --name pharma-dev-cluster
+
+# List all ingress resources across all namespaces (note their names)
+kubectl get ingress --all-namespaces
+
+# Delete all ingress resources — removes routing rules from the NLB
+kubectl delete ingress --all --all-namespaces
+
+# Delete the NGINX Ingress Controller service — this triggers AWS to deprovision the NLB
+kubectl delete svc ingress-nginx-controller -n ingress-nginx
+
+# Wait ~2 minutes, then confirm the NLB is gone
+aws elbv2 describe-load-balancers \
+  --query 'LoadBalancers[].{Name:LoadBalancerName,State:State.Code}' \
+  --output table
+```
+
+The NLB is fully gone when the above command returns an empty table or no NLB with a name starting with `k8s-`.
+
+#### Option B — AWS Console (if kubectl is not available)
+
+1. Go to **AWS Console → EC2 → Load Balancers** (left sidebar)
+2. Find the Network Load Balancer for your cluster — it will have a name starting with `k8s-` and be tagged with `kubernetes.io/cluster/pharma-dev-cluster`
+3. Select it → **Actions → Delete load balancer**
+4. Type `confirm` in the confirmation box → click **Delete**
+5. Wait for the load balancer to disappear from the list (refresh the page every 30 seconds)
+6. Also check **EC2 → Target Groups** — delete any target groups tagged with the cluster name that remain after the NLB is gone
+
+---
+
+### Step 2 — Run the Destroy Workflow via GitHub Actions
 
 1. Go to your fork on GitHub → **Actions**
-2. Select **Terraform Infrastructure** workflow
-3. Click **Run workflow**
-4. Set:
+2. Select the **Terraform Infrastructure** workflow (left sidebar)
+3. Click **Run workflow** (top right of the workflow runs list)
+4. Set the inputs:
+   - **Branch**: `main`
    - **Terraform action**: `destroy`
    - **Type "destroy" to confirm**: `destroy`
 5. Click **Run workflow**
-6. The destroy job will pause for approval — review then approve
+6. The destroy job will pause for manual approval — go to the running workflow and click **Review deployments → Approve**
 7. Wait 15–25 minutes for all resources to be deleted
 
-### Locally (Alternative)
+> **Note on ECR repositories**: The destroy workflow will **not** delete your ECR repositories. They are created with `image_tag_mutability = IMMUTABLE` and `force_delete = false`, which prevents accidental deletion. You can safely ignore any Terraform warnings about ECR during destroy — the repositories will remain in your AWS account. Delete them manually from the ECR console if you no longer need them.
 
-```bash
-cd envs/dev
-terraform init -backend-config=backend.tfvars
-terraform destroy \
-  -var="aws_region=us-east-1" \
-  -var="db_password=dummy" \
-  -var="jwt_secret=dummy" \
-  -var="github_org=YOUR-GITHUB-USERNAME"
-```
-
-Type `yes` when prompted.
+---
 
 ### After Destroying
 
