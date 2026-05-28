@@ -1,4 +1,3 @@
-# Initial dev environment eks setup new changes added by pankaj test
 
 data "aws_caller_identity" "current" {}
 
