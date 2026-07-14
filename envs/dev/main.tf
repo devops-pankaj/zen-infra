@@ -1,3 +1,5 @@
+# Initial dev environment setup
+
 module "ecr" {
   source = "../../modules/ecr"
 
